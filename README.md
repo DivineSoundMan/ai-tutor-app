@@ -11,12 +11,33 @@ An intelligent tutoring application powered by Claude AI that helps students lea
 
 ## 🚀 Getting Started
 
-### Prerequisites
+### Deploy to Streamlit Community Cloud (Recommended)
 
-- Python 3.8 or higher
-- An Anthropic API key ([Get one here](https://console.anthropic.com/))
+The easiest way to run this app is on [Streamlit Community Cloud](https://share.streamlit.io/) (free):
 
-### Installation
+1. Push this repo to GitHub (e.g. `github.com/DivineSoundMan/ai-tutor-app`)
+2. Go to [share.streamlit.io](https://share.streamlit.io/) and click **New app**
+3. Select your repo, branch `main`, and main file `app.py`
+4. Click **Advanced settings** and add your secrets:
+   ```toml
+   ANTHROPIC_API_KEY = "sk-ant-..."
+   ADMIN_PASSWORD = "your-secure-password"
+   ```
+5. Click **Deploy**
+
+Your app will be live at `https://<your-app>.streamlit.app`.
+
+### Adding Transcript Files
+
+Transcript files committed to the `transcripts/` folder in the repo are **permanently available** and persist across app restarts. To add files:
+
+1. Place `.txt`, `.docx`, or `.pdf` files in the `transcripts/` folder
+2. Commit and push to GitHub
+3. Streamlit Cloud will automatically redeploy with the new files
+
+Files uploaded via the admin panel are **session-only** and are lost when the app restarts.
+
+### Run Locally (Alternative)
 
 1. Clone the repository:
 ```bash
@@ -29,23 +50,26 @@ cd ai-tutor-app
 pip install -r requirements.txt
 ```
 
-3. Set up your Anthropic API key:
-```bash
-export ANTHROPIC_API_KEY='your-api-key-here'
-```
+3. Set up your secrets (choose one):
 
-For Windows:
-```cmd
-set ANTHROPIC_API_KEY=your-api-key-here
-```
+   **Option A** — Environment variables:
+   ```bash
+   export ANTHROPIC_API_KEY='your-api-key-here'
+   export ADMIN_PASSWORD='your-password'
+   ```
 
-### Running the App
+   **Option B** — Streamlit secrets file (`.streamlit/secrets.toml`):
+   ```toml
+   ANTHROPIC_API_KEY = "your-api-key-here"
+   ADMIN_PASSWORD = "your-password"
+   ```
 
+4. Run the app:
 ```bash
 streamlit run app.py
 ```
 
-The app will open in your default web browser at `http://localhost:8501`
+The app will open at `http://localhost:8501`
 
 ## 📖 How to Use
 
@@ -84,8 +108,12 @@ The app will open in your default web browser at `http://localhost:8501`
 ai-tutor-app/
 ├── app.py              # Main application file
 ├── requirements.txt    # Python dependencies
-├── .gitignore         # Git ignore rules
-└── README.md          # This file
+├── transcripts/        # Bundled transcript files (persist on Streamlit Cloud)
+├── data/uploads/       # Session uploads (ephemeral)
+├── .streamlit/
+│   └── config.toml     # Streamlit theme & settings
+├── .gitignore          # Git ignore rules
+└── README.md           # This file
 ```
 
 ## 🎓 Use Cases

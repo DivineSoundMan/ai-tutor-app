@@ -1,6 +1,9 @@
-# Uploaded transcript data (keep directory, ignore content)
+# Session uploads (temporary, not persisted on Streamlit Cloud)
 data/uploads/*
 !data/uploads/.gitkeep
+
+# Streamlit secrets (managed via Streamlit Cloud dashboard)
+.streamlit/secrets.toml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

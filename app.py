@@ -11,8 +11,18 @@ from datetime import datetime
 
 # --- Configuration ---
 APP_TITLE = "SL Class Meaning's: 1-5|19-25|26-28 Only"
-UPLOAD_DIR = Path("data/uploads")
+UPLOAD_DIR = Path("data/uploads")          # session-only uploads (ephemeral on Streamlit Cloud)
+TRANSCRIPTS_DIR = Path("transcripts")      # bundled files committed to repo (persist across restarts)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _get_secret(key: str, default: str = "") -> str:
+    """Read from st.secrets first, fall back to env var."""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.environ.get(key, default)
 
 # Page configuration
 st.set_page_config(
@@ -101,19 +111,23 @@ st.markdown(
 # Helper functions
 # ------------------------------------------------------------------
 
-def get_uploaded_files():
-    """Return list of dicts for every file in the uploads dir."""
+def get_all_files():
+    """Return list of dicts for files in both transcripts/ (bundled) and data/uploads/ (session)."""
     files = []
-    for f in UPLOAD_DIR.iterdir():
-        if f.is_file() and not f.name.startswith("."):
-            files.append(
-                {
-                    "name": f.name,
-                    "path": str(f),
-                    "size": f.stat().st_size,
-                    "modified": datetime.fromtimestamp(f.stat().st_mtime),
-                }
-            )
+    for directory, source in [(TRANSCRIPTS_DIR, "bundled"), (UPLOAD_DIR, "uploaded")]:
+        if not directory.exists():
+            continue
+        for f in directory.iterdir():
+            if f.is_file() and not f.name.startswith("."):
+                files.append(
+                    {
+                        "name": f.name,
+                        "path": str(f),
+                        "size": f.stat().st_size,
+                        "modified": datetime.fromtimestamp(f.stat().st_mtime),
+                        "source": source,
+                    }
+                )
     return sorted(files, key=lambda x: x["name"])
 
 
@@ -142,8 +156,8 @@ def read_file_content(filepath):
 
 
 def get_all_transcript_content():
-    """Concatenate content from every uploaded file (cap at ~120 000 chars)."""
-    files = get_uploaded_files()
+    """Concatenate content from every file (bundled + uploaded, cap at ~120 000 chars)."""
+    files = get_all_files()
     parts = []
     total = 0
     limit = 120_000
@@ -229,7 +243,7 @@ if "page" not in st.session_state:
 
 # Anthropic client
 try:
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    client = anthropic.Anthropic(api_key=_get_secret("ANTHROPIC_API_KEY"))
     MODEL = "claude-sonnet-4-5-20250929"
 except Exception:
     client = None
@@ -251,16 +265,17 @@ with st.sidebar:
 
     # -- Files list --
     st.markdown('<p class="sidebar-section">Files used as context</p>', unsafe_allow_html=True)
-    files = get_uploaded_files()
+    files = get_all_files()
     if files:
         for f in files:
             kb = f["size"] / 1024
+            icon = "📌" if f["source"] == "bundled" else "📄"
             st.markdown(
-                f'<p class="sidebar-file">📄 {f["name"]}  <span style="color:#666">({kb:.0f} KB)</span></p>',
+                f'<p class="sidebar-file">{icon} {f["name"]}  <span style="color:#666">({kb:.0f} KB)</span></p>',
                 unsafe_allow_html=True,
             )
     else:
-        st.caption("No files uploaded yet.")
+        st.caption("No transcript files yet.")
 
     # -- Quick upload --
     st.divider()
@@ -305,7 +320,7 @@ if st.session_state.page == "admin":
         with col_m:
             pw = st.text_input("Password", type="password", placeholder="Enter admin password")
             if st.button("🔓 Login", use_container_width=True):
-                if pw == os.environ.get("ADMIN_PASSWORD", "admin"):
+                if pw == _get_secret("ADMIN_PASSWORD", "admin"):
                     st.session_state.admin_auth = True
                     st.rerun()
                 else:
@@ -321,25 +336,27 @@ if st.session_state.page == "admin":
         )
 
         # --- Stats ---
-        files = get_uploaded_files()
+        files = get_all_files()
+        bundled = [f for f in files if f["source"] == "bundled"]
+        uploaded = [f for f in files if f["source"] == "uploaded"]
         total_kb = sum(f["size"] for f in files) / 1024
-        extensions = set(Path(f["name"]).suffix for f in files) if files else set()
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("📁 Total Files", len(files))
-        c2.metric("💾 Total Size", f"{total_kb:.1f} KB")
-        c3.metric("📄 File Types", ", ".join(extensions) if extensions else "—")
+        c1.metric("📌 Bundled", len(bundled))
+        c2.metric("📄 Session Uploads", len(uploaded))
+        c3.metric("💾 Total Size", f"{total_kb:.1f} KB")
 
         st.divider()
 
         # --- Upload section ---
-        st.subheader("📤 Upload Transcripts")
+        st.subheader("📤 Upload Transcripts (Session Only)")
+        st.caption("These files persist for this session only. To add permanent files, commit them to the `transcripts/` folder in the repo.")
         admin_files = st.file_uploader(
             "Drag and drop transcript files here",
             type=["txt", "docx", "pdf"],
             accept_multiple_files=True,
             key="admin_upload",
-            help="Supported formats: .txt, .docx, .pdf",
+            help="Supported formats: .txt, .docx, .pdf — session uploads are lost on app restart",
         )
         if admin_files:
             if st.button("💾 Save Uploaded Files", use_container_width=False):
@@ -370,39 +387,46 @@ if st.session_state.page == "admin":
         st.divider()
 
         # --- Manage files ---
-        st.subheader("📁 Manage Uploaded Files")
-        files = get_uploaded_files()
+        st.subheader("📁 Manage Transcript Files")
+        files = get_all_files()
 
         if not files:
-            st.info("No files uploaded yet. Use the section above to add class transcripts.")
+            st.info("No transcript files yet. Add files to the `transcripts/` folder in the repo, or use the upload section above for session files.")
         else:
             for f in files:
+                is_bundled = f["source"] == "bundled"
+                icon = "📌" if is_bundled else "📄"
+                badge = "Bundled" if is_bundled else "Session"
+
                 with st.container():
                     col_name, col_preview, col_dl, col_del = st.columns([4, 1, 1, 1])
 
                     with col_name:
-                        st.markdown(f"**📄 {f['name']}**")
+                        st.markdown(f"**{icon} {f['name']}**  `{badge}`")
                         st.caption(
                             f"{f['size']/1024:.1f} KB  ·  Modified {f['modified'].strftime('%b %d, %Y %I:%M %p')}"
                         )
 
                     with col_preview:
-                        if st.button("👁️", key=f"prev_{f['name']}", help="Preview"):
-                            toggle_key = f"_show_{f['name']}"
+                        if st.button("👁️", key=f"prev_{f['name']}_{f['source']}", help="Preview"):
+                            toggle_key = f"_show_{f['name']}_{f['source']}"
                             st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
 
                     with col_dl:
                         raw = Path(f["path"]).read_bytes()
-                        st.download_button("⬇️", data=raw, file_name=f["name"], key=f"dl_{f['name']}", help="Download")
+                        st.download_button("⬇️", data=raw, file_name=f["name"], key=f"dl_{f['name']}_{f['source']}", help="Download")
 
                     with col_del:
-                        if st.button("🗑️", key=f"del_{f['name']}", help="Delete"):
-                            Path(f["path"]).unlink()
-                            st.success(f"Deleted {f['name']}")
-                            st.rerun()
+                        if is_bundled:
+                            st.button("🔒", key=f"del_{f['name']}_{f['source']}", help="Bundled files are managed in the repo", disabled=True)
+                        else:
+                            if st.button("🗑️", key=f"del_{f['name']}_{f['source']}", help="Delete"):
+                                Path(f["path"]).unlink()
+                                st.success(f"Deleted {f['name']}")
+                                st.rerun()
 
                     # Preview
-                    toggle_key = f"_show_{f['name']}"
+                    toggle_key = f"_show_{f['name']}_{f['source']}"
                     if st.session_state.get(toggle_key, False):
                         content = read_file_content(f["path"])
                         preview = content[:5000] + ("\n\n… (truncated)" if len(content) > 5000 else "")
@@ -411,7 +435,7 @@ if st.session_state.page == "admin":
                             value=preview,
                             height=220,
                             disabled=True,
-                            key=f"txt_{f['name']}",
+                            key=f"txt_{f['name']}_{f['source']}",
                         )
 
                     st.markdown("---")
@@ -538,7 +562,7 @@ No external sources are used.</p>
                         )
                 except Exception as e:
                     st.error(f"Error: {e}")
-                    st.info("Make sure the ANTHROPIC_API_KEY environment variable is set correctly.")
+                    st.info("Make sure ANTHROPIC_API_KEY is set in Streamlit secrets or as an environment variable.")
 
             elif not transcript_content:
                 no_files_msg = (
@@ -551,7 +575,7 @@ No external sources are used.</p>
                     {"role": "assistant", "content": no_files_msg}
                 )
             else:
-                key_msg = "Please configure the ANTHROPIC_API_KEY environment variable to use the AI tutor."
+                key_msg = "Please configure ANTHROPIC_API_KEY in Streamlit secrets or as an environment variable."
                 st.warning(key_msg)
                 st.session_state.messages.append(
                     {"role": "assistant", "content": key_msg}
