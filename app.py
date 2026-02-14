@@ -240,13 +240,27 @@ if "admin_auth" not in st.session_state:
     st.session_state.admin_auth = False
 if "page" not in st.session_state:
     st.session_state.page = "learn"
+if "user_api_key" not in st.session_state:
+    st.session_state.user_api_key = ""
 
 # Anthropic client
-try:
-    client = anthropic.Anthropic(api_key=_get_secret("ANTHROPIC_API_KEY"))
-    MODEL = "claude-sonnet-4-5-20250929"
-except Exception:
-    client = None
+MODEL = "claude-sonnet-4-5-20250929"
+
+
+def _get_anthropic_client():
+    """Create Anthropic client from secrets, env var, or user-provided key."""
+    api_key = _get_secret("ANTHROPIC_API_KEY")
+    if not api_key and st.session_state.get("user_api_key"):
+        api_key = st.session_state.user_api_key
+    if api_key:
+        try:
+            return anthropic.Anthropic(api_key=api_key)
+        except Exception:
+            return None
+    return None
+
+
+client = _get_anthropic_client()
 
 # ------------------------------------------------------------------
 # Sidebar
@@ -262,6 +276,40 @@ with st.sidebar:
     st.session_state.page = "admin" if "Admin" in page_choice else "learn"
 
     st.divider()
+
+    # -- API Key input (fallback when not configured via secrets/env) --
+    preconfigured_key = _get_secret("ANTHROPIC_API_KEY")
+    if not preconfigured_key:
+        st.markdown('<p class="sidebar-section">API Configuration</p>', unsafe_allow_html=True)
+        entered_key = st.text_input(
+            "Anthropic API Key",
+            type="password",
+            value=st.session_state.get("user_api_key", ""),
+            placeholder="sk-ant-...",
+            key="sidebar_api_key_input",
+            help="Enter your Anthropic API key. It is stored only in your session and never saved to disk.",
+        )
+        if entered_key != st.session_state.get("user_api_key", ""):
+            st.session_state.user_api_key = entered_key
+            st.rerun()
+
+        if client:
+            st.markdown(
+                '<p style="color: #4ecdc4; font-size: 0.85rem;">&#9679; API key configured</p>',
+                unsafe_allow_html=True,
+            )
+        elif st.session_state.get("user_api_key"):
+            st.markdown(
+                '<p style="color: #ff6b6b; font-size: 0.85rem;">&#9679; Invalid API key</p>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<p style="color: #7a7a9a; font-size: 0.85rem;">&#9675; No API key provided</p>',
+                unsafe_allow_html=True,
+            )
+
+        st.divider()
 
     # -- Files list --
     st.markdown('<p class="sidebar-section">Files used as context</p>', unsafe_allow_html=True)
@@ -575,7 +623,11 @@ No external sources are used.</p>
                     {"role": "assistant", "content": no_files_msg}
                 )
             else:
-                key_msg = "Please configure ANTHROPIC_API_KEY in Streamlit secrets or as an environment variable."
+                key_msg = (
+                    "No API key is configured. Please either set ANTHROPIC_API_KEY "
+                    "in Streamlit secrets / environment variables, or enter your "
+                    "Anthropic API key in the sidebar."
+                )
                 st.warning(key_msg)
                 st.session_state.messages.append(
                     {"role": "assistant", "content": key_msg}
