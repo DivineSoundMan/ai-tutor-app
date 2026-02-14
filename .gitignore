@@ -1,3 +1,7 @@
+# Uploaded transcript data (keep directory, ignore content)
+data/uploads/*
+!data/uploads/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
