@@ -207,11 +207,14 @@ def start_ollama_service():
         return True, msg
 
     try:
+        env = os.environ.copy()
+        env.setdefault("OLLAMA_HOST", "0.0.0.0:11434")
         subprocess.Popen(
             ["ollama", "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
 
         # Poll health endpoint for up to 15 seconds
@@ -305,6 +308,33 @@ def restart_ollama_service():
     return start_ollama_service()
 
 
+def ensure_ollama_running():
+    """Auto-start Ollama if it is not already running.
+
+    Called on every Streamlit re-run so the model self-heals after a crash.
+    Uses a session flag to avoid spamming start attempts every re-run.
+    """
+    status, _ = check_ollama_status()
+    if status == "ready":
+        st.session_state.pop("_ollama_start_failed", None)
+        return True
+
+    # Don't retry if we already failed in this session within the last 30s
+    last_fail = st.session_state.get("_ollama_start_failed", 0)
+    if time.time() - last_fail < 30:
+        return False
+
+    service_logger.info("Ollama offline — attempting auto-start")
+    ok, msg = start_ollama_service()
+    if ok:
+        service_logger.info(f"Auto-start succeeded: {msg}")
+        return True
+
+    st.session_state["_ollama_start_failed"] = time.time()
+    service_logger.warning(f"Auto-start failed: {msg}")
+    return False
+
+
 def stream_ollama_response(messages, system_prompt):
     """Stream a response from Ollama, yielding text chunks."""
     payload = {
@@ -323,7 +353,7 @@ def stream_ollama_response(messages, system_prompt):
             f"{OLLAMA_HOST}/api/chat",
             json=payload,
             stream=True,
-            timeout=120,
+            timeout=(10, 180),  # (connect, read) — first request after cold start loads model into RAM
         )
         resp.raise_for_status()
         for line in resp.iter_lines():
@@ -495,6 +525,9 @@ if "service_log" not in st.session_state:
 if "confirm_stop_ollama" not in st.session_state:
     st.session_state.confirm_stop_ollama = False
 
+# Auto-start Ollama if it crashed or wasn't started
+ensure_ollama_running()
+
 
 # ------------------------------------------------------------------
 # Sidebar
@@ -531,6 +564,15 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
         st.caption(detail)
+        if st.button("▶️ Start Ollama", key="sidebar_start_ollama", use_container_width=True):
+            with st.spinner("Starting Ollama..."):
+                ok, msg = start_ollama_service()
+            if ok:
+                st.success(msg)
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(msg)
 
     st.caption(f"Backend: Ollama · {OLLAMA_MODEL}")
 
@@ -939,8 +981,15 @@ No external sources are used. Powered by open-source AI (Llama 3.2).</p>
                     {"role": "assistant", "content": no_files_msg}
                 )
             else:
-                # Check model availability
+                # Check model availability — auto-recover if offline
                 model_status, model_detail = check_ollama_status()
+
+                if model_status != "ready":
+                    # Attempt auto-start before giving up
+                    with st.spinner("AI model is offline — attempting to start Ollama..."):
+                        auto_ok = ensure_ollama_running()
+                    if auto_ok:
+                        model_status, model_detail = check_ollama_status()
 
                 if model_status != "ready":
                     if model_status == "no_model":
@@ -950,8 +999,8 @@ No external sources are used. Powered by open-source AI (Llama 3.2).</p>
                         )
                     else:
                         wait_msg = (
-                            f"⚠️ The AI model server is currently unavailable ({model_detail}). "
-                            "Please try again in a moment."
+                            f"⚠️ Could not start the AI model server ({model_detail}). "
+                            "Please try again in a moment or ask the admin to check the server."
                         )
                     st.warning(wait_msg)
                     st.session_state.messages.append(
