@@ -16,6 +16,7 @@ import signal
 import logging
 from pathlib import Path
 from datetime import datetime
+from version import APP_VERSION, VERSION_STRING, BUILD_DATE, GIT_HASH
 
 # --- Configuration ---
 APP_TITLE = "SL Class Meaning's: 1-5|19-25|26-28 Only"
@@ -36,6 +37,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 service_logger = logging.getLogger("ollama.service")
+logging.getLogger("app").info(f"Starting {APP_TITLE} {VERSION_STRING} (built {BUILD_DATE})")
 
 
 def _get_secret(key: str, default: str = "") -> str:
@@ -48,7 +50,7 @@ def _get_secret(key: str, default: str = "") -> str:
 
 # Page configuration
 st.set_page_config(
-    page_title=APP_TITLE,
+    page_title=f"{APP_TITLE} {VERSION_STRING}",
     page_icon="🙏",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -592,21 +594,14 @@ with st.sidebar:
     else:
         st.caption("No transcript files yet.")
 
-    # -- Quick upload --
+    # -- Info for students (no upload capability) --
+    if st.session_state.page == "learn":
+        st.divider()
+        st.caption("To add new class transcripts, contact your teacher or use the Admin Panel.")
+
+    # -- Version info --
     st.divider()
-    st.markdown('<p class="sidebar-section">Quick Upload</p>', unsafe_allow_html=True)
-    quick_files = st.file_uploader(
-        "Upload",
-        type=["txt", "docx", "pdf"],
-        accept_multiple_files=True,
-        key="quick_upload",
-        label_visibility="collapsed",
-    )
-    if quick_files:
-        for uf in quick_files:
-            (UPLOAD_DIR / uf.name).write_bytes(uf.getbuffer())
-        st.success(f"Uploaded {len(quick_files)} file(s)")
-        st.rerun()
+    st.caption(f"{VERSION_STRING}  ·  Built {BUILD_DATE}")
 
     # -- Example prompts (learn page) --
     if st.session_state.page == "learn":
@@ -643,9 +638,10 @@ if st.session_state.page == "admin":
     else:
         # --- Admin banner ---
         st.markdown(
-            """<div class="admin-banner">
+            f"""<div class="admin-banner">
                 <h2>⚙️ Admin Panel — File Management</h2>
                 <p>Upload and manage Soundarya Lahiri class transcripts. Students will learn strictly from these files.</p>
+                <p style="opacity:0.6; font-size:0.8rem; margin-top:8px;">{VERSION_STRING}  ·  Built {BUILD_DATE}</p>
             </div>""",
             unsafe_allow_html=True,
         )
@@ -895,7 +891,11 @@ if st.session_state.page == "admin":
 # ===================================================================
 else:
     # --- Header ---
-    st.markdown(f'<p class="app-title">{APP_TITLE}</p>', unsafe_allow_html=True)
+    _hdr_left, _hdr_right = st.columns([5, 1])
+    with _hdr_left:
+        st.markdown(f'<p class="app-title">{APP_TITLE}</p>', unsafe_allow_html=True)
+    with _hdr_right:
+        st.caption(VERSION_STRING)
     st.markdown(
         '<p class="app-subtitle">'
         "Jaya Guru Datta!  Learn SL meanings &amp; test yourself by sloka with this AI-Powered Friend. "
