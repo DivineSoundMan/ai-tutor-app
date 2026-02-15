@@ -13,6 +13,7 @@ import os
 import time
 import subprocess
 import signal
+import shutil
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -28,6 +29,7 @@ TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 # Ollama configuration
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+OLLAMA_BINARY = shutil.which("ollama") or "/usr/local/bin/ollama"
 MAX_CONVERSATION_EXCHANGES = 10  # keep last 10 user-assistant pairs
 
 # Service control logging
@@ -185,8 +187,16 @@ def _log_service_event(action: str, result: str):
 def get_ollama_pids():
     """Return list of PIDs for running Ollama server processes."""
     try:
+        # Use pgrep -x for exact match on the process name first
         result = subprocess.run(
-            ["pgrep", "-f", "ollama serve"],
+            ["pgrep", "-x", "ollama"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return [int(p) for p in result.stdout.strip().split("\n") if p.strip()]
+        # Fallback: broader match but exclude pgrep's own process
+        result = subprocess.run(
+            ["pgrep", "-f", "ollama"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -208,11 +218,21 @@ def start_ollama_service():
         _log_service_event("START", msg)
         return True, msg
 
+    # Resolve binary — prefer detected path, fall back to bare name
+    binary = OLLAMA_BINARY
+    if not os.path.isfile(binary):
+        binary = "ollama"
+
     try:
         env = os.environ.copy()
         env.setdefault("OLLAMA_HOST", "0.0.0.0:11434")
+        # Ensure common binary dirs are in PATH
+        path_dirs = env.get("PATH", "")
+        for d in ("/usr/local/bin", "/usr/bin", "/snap/bin"):
+            if d not in path_dirs:
+                env["PATH"] = f"{d}:{path_dirs}"
         subprocess.Popen(
-            ["ollama", "serve"],
+            [binary, "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -238,7 +258,7 @@ def start_ollama_service():
         return False, msg
 
     except FileNotFoundError:
-        msg = "ollama binary not found — is Ollama installed?"
+        msg = f"ollama binary not found at '{binary}' — is Ollama installed?"
         _log_service_event("START", msg)
         return False, msg
     except Exception as e:
@@ -321,9 +341,13 @@ def ensure_ollama_running():
         st.session_state.pop("_ollama_start_failed", None)
         return True
 
-    # Don't retry if we already failed in this session within the last 30s
+    # If the server is reachable but model missing, don't try to restart
+    if status in ("no_model", "server_error"):
+        return False
+
+    # Don't retry start if we already failed recently (10s cooldown)
     last_fail = st.session_state.get("_ollama_start_failed", 0)
-    if time.time() - last_fail < 30:
+    if time.time() - last_fail < 10:
         return False
 
     service_logger.info("Ollama offline — attempting auto-start")
