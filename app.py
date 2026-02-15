@@ -11,6 +11,9 @@ import requests
 import json
 import os
 import time
+import subprocess
+import signal
+import logging
 from pathlib import Path
 from datetime import datetime
 
@@ -25,6 +28,14 @@ TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
 MAX_CONVERSATION_EXCHANGES = 10  # keep last 10 user-assistant pairs
+
+# Service control logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+service_logger = logging.getLogger("ollama.service")
 
 
 def _get_secret(key: str, default: str = "") -> str:
@@ -154,6 +165,144 @@ def check_ollama_status():
         return "timeout", "Ollama server timed out"
     except Exception as e:
         return "error", str(e)
+
+
+# ------------------------------------------------------------------
+# Ollama service control
+# ------------------------------------------------------------------
+
+def _log_service_event(action: str, result: str):
+    """Append an event to the in-session service log."""
+    entry = f"[{datetime.now().strftime('%H:%M:%S')}] {action}: {result}"
+    if "service_log" not in st.session_state:
+        st.session_state.service_log = []
+    st.session_state.service_log.append(entry)
+    service_logger.info(f"{action} — {result}")
+
+
+def get_ollama_pids():
+    """Return list of PIDs for running Ollama server processes."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "ollama serve"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        return [int(p) for p in result.stdout.strip().split("\n") if p.strip()]
+    except Exception:
+        return []
+
+
+def start_ollama_service():
+    """Start the Ollama server as a background process.
+
+    Returns (success: bool, message: str).
+    """
+    # Already running?
+    status, _ = check_ollama_status()
+    if status == "ready":
+        msg = "Ollama is already running"
+        _log_service_event("START", msg)
+        return True, msg
+
+    try:
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        # Poll health endpoint for up to 15 seconds
+        for _ in range(15):
+            time.sleep(1)
+            try:
+                resp = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=2)
+                if resp.status_code == 200:
+                    pids = get_ollama_pids()
+                    pid_str = pids[0] if pids else "?"
+                    msg = f"Ollama started successfully (PID {pid_str})"
+                    _log_service_event("START", msg)
+                    return True, msg
+            except requests.ConnectionError:
+                pass
+
+        msg = "Ollama process started but health check failed after 15 s"
+        _log_service_event("START", msg)
+        return False, msg
+
+    except FileNotFoundError:
+        msg = "ollama binary not found — is Ollama installed?"
+        _log_service_event("START", msg)
+        return False, msg
+    except Exception as e:
+        msg = f"Failed to start: {e}"
+        _log_service_event("START", msg)
+        return False, msg
+
+
+def stop_ollama_service():
+    """Gracefully stop the Ollama server (SIGTERM then SIGKILL).
+
+    Returns (success: bool, message: str).
+    """
+    pids = get_ollama_pids()
+    if not pids:
+        msg = "Ollama is not running"
+        _log_service_event("STOP", msg)
+        return True, msg
+
+    try:
+        # Graceful SIGTERM
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+        # Wait up to 5 s for graceful shutdown
+        for _ in range(10):
+            time.sleep(0.5)
+            if not get_ollama_pids():
+                msg = "Ollama stopped gracefully"
+                _log_service_event("STOP", msg)
+                return True, msg
+
+        # Force-kill remaining processes
+        for pid in get_ollama_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(1)
+
+        if not get_ollama_pids():
+            msg = "Ollama force-stopped (SIGKILL)"
+            _log_service_event("STOP", msg)
+            return True, msg
+
+        msg = "Could not stop all Ollama processes"
+        _log_service_event("STOP", msg)
+        return False, msg
+
+    except Exception as e:
+        msg = f"Error stopping Ollama: {e}"
+        _log_service_event("STOP", msg)
+        return False, msg
+
+
+def restart_ollama_service():
+    """Stop then start the Ollama server.
+
+    Returns (success: bool, message: str).
+    """
+    _log_service_event("RESTART", "Initiated")
+    stop_ok, stop_msg = stop_ollama_service()
+    if not stop_ok:
+        return False, f"Restart aborted — stop failed: {stop_msg}"
+    time.sleep(2)
+    return start_ollama_service()
 
 
 def stream_ollama_response(messages, system_prompt):
@@ -341,6 +490,10 @@ if "admin_auth" not in st.session_state:
     st.session_state.admin_auth = False
 if "page" not in st.session_state:
     st.session_state.page = "learn"
+if "service_log" not in st.session_state:
+    st.session_state.service_log = []
+if "confirm_stop_ollama" not in st.session_state:
+    st.session_state.confirm_stop_ollama = False
 
 
 # ------------------------------------------------------------------
@@ -469,6 +622,102 @@ if st.session_state.page == "admin":
         status, detail = check_ollama_status()
         status_label = {"ready": "Ready", "no_model": "Loading...", "offline": "Offline"}.get(status, "Error")
         c4.metric("🤖 Model", status_label)
+
+        st.divider()
+
+        # --- Ollama Service Control ---
+        st.subheader("🖥️ Ollama Service Control")
+
+        svc_status, svc_detail = check_ollama_status()
+        svc_pids = get_ollama_pids()
+        is_running = svc_status == "ready"
+
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            if is_running:
+                st.markdown(
+                    '<span class="model-badge model-ready">● Running</span>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<span class="model-badge model-error">● Stopped</span>',
+                    unsafe_allow_html=True,
+                )
+        with sc2:
+            st.caption(f"**Model:** {svc_detail}" if is_running else "**Model:** —")
+        with sc3:
+            pid_str = ", ".join(str(p) for p in svc_pids) if svc_pids else "—"
+            st.caption(f"**PID:** {pid_str}  ·  `{OLLAMA_HOST}`")
+
+        # Control buttons
+        btn1, btn2, btn3 = st.columns(3)
+
+        with btn1:
+            if st.button("▶️ Start", disabled=is_running, use_container_width=True, help="Start Ollama server"):
+                with st.spinner("Starting Ollama (may take 5–10 s)..."):
+                    ok, msg = start_ollama_service()
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+                    st.caption("💡 Check that Ollama is installed and the binary is in PATH.")
+                time.sleep(1.5)
+                st.rerun()
+
+        with btn2:
+            if not st.session_state.confirm_stop_ollama:
+                if st.button("⏹️ Stop", disabled=not is_running, use_container_width=True, help="Stop Ollama server"):
+                    if st.session_state.messages:
+                        st.session_state.confirm_stop_ollama = True
+                        st.rerun()
+                    else:
+                        with st.spinner("Stopping Ollama..."):
+                            ok, msg = stop_ollama_service()
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                        time.sleep(1.5)
+                        st.rerun()
+            else:
+                st.warning("⚠️ Active chat exists — stopping will interrupt it.")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("✅ Confirm Stop", type="primary", use_container_width=True):
+                        st.session_state.confirm_stop_ollama = False
+                        with st.spinner("Stopping Ollama..."):
+                            ok, msg = stop_ollama_service()
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                        time.sleep(1.5)
+                        st.rerun()
+                with cc2:
+                    if st.button("❌ Cancel", use_container_width=True):
+                        st.session_state.confirm_stop_ollama = False
+                        st.rerun()
+
+        with btn3:
+            if st.button("🔄 Restart", use_container_width=True, help="Stop then start Ollama"):
+                with st.spinner("Restarting Ollama..."):
+                    ok, msg = restart_ollama_service()
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+                time.sleep(1.5)
+                st.rerun()
+
+        # Operation log
+        if st.session_state.service_log:
+            with st.expander(f"📋 Service Log ({len(st.session_state.service_log)} events)"):
+                for entry in reversed(st.session_state.service_log[-20:]):
+                    st.text(entry)
+                if st.button("🗑️ Clear Log"):
+                    st.session_state.service_log = []
+                    st.rerun()
 
         st.divider()
 
