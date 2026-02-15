@@ -1,20 +1,30 @@
 """
 SL Class Meaning's - Soundarya Lahiri AI Tutor
 Admin panel for transcript management + Student chat for learning sloka meanings
+
+Backend: Ollama with llama3.2:3b (free, self-hosted)
+Deployment target: Hugging Face Spaces (Docker)
 """
 
 import streamlit as st
-import anthropic
+import requests
+import json
 import os
+import time
 from pathlib import Path
 from datetime import datetime
 
 # --- Configuration ---
 APP_TITLE = "SL Class Meaning's: 1-5|19-25|26-28 Only"
-UPLOAD_DIR = Path("data/uploads")          # session-only uploads (ephemeral on Streamlit Cloud)
+UPLOAD_DIR = Path("data/uploads")          # session-only uploads (ephemeral)
 TRANSCRIPTS_DIR = Path("transcripts")      # bundled files committed to repo (persist across restarts)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Ollama configuration
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+MAX_CONVERSATION_EXCHANGES = 10  # keep last 10 user-assistant pairs
 
 
 def _get_secret(key: str, default: str = "") -> str:
@@ -23,6 +33,7 @@ def _get_secret(key: str, default: str = "") -> str:
         return st.secrets[key]
     except (KeyError, FileNotFoundError):
         return os.environ.get(key, default)
+
 
 # Page configuration
 st.set_page_config(
@@ -102,10 +113,96 @@ st.markdown(
         padding: 3px 0;
         color: #c0c0d0;
     }
+
+    /* Model status badge */
+    .model-badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 0.78rem;
+        font-weight: 600;
+    }
+    .model-ready { background: #1a3a2a; color: #4ecdc4; border: 1px solid #2a5a3a; }
+    .model-loading { background: #3a3a1a; color: #f0c040; border: 1px solid #5a5a2a; }
+    .model-error { background: #3a1a1a; color: #ff6b6b; border: 1px solid #5a2a2a; }
 </style>
 """,
     unsafe_allow_html=True,
 )
+
+# ------------------------------------------------------------------
+# Ollama backend
+# ------------------------------------------------------------------
+
+def check_ollama_status():
+    """Check if Ollama server is running and model is available."""
+    try:
+        resp = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
+        if resp.status_code != 200:
+            return "server_error", "Ollama server returned an error"
+        models = resp.json().get("models", [])
+        model_names = [m.get("name", "") for m in models]
+        # Check exact match or match without tag
+        base_model = OLLAMA_MODEL.split(":")[0]
+        for name in model_names:
+            if name == OLLAMA_MODEL or name.startswith(base_model):
+                return "ready", name
+        return "no_model", f"Model '{OLLAMA_MODEL}' not found. Available: {', '.join(model_names) or 'none'}"
+    except requests.ConnectionError:
+        return "offline", "Ollama server is not running"
+    except requests.Timeout:
+        return "timeout", "Ollama server timed out"
+    except Exception as e:
+        return "error", str(e)
+
+
+def stream_ollama_response(messages, system_prompt):
+    """Stream a response from Ollama, yielding text chunks."""
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "system", "content": system_prompt}] + messages,
+        "stream": True,
+        "options": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "num_predict": 2048,
+            "num_ctx": 4096,
+        },
+    }
+    try:
+        resp = requests.post(
+            f"{OLLAMA_HOST}/api/chat",
+            json=payload,
+            stream=True,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if line:
+                data = json.loads(line)
+                chunk = data.get("message", {}).get("content", "")
+                if chunk:
+                    yield chunk
+                if data.get("done", False):
+                    break
+    except requests.ConnectionError:
+        yield "\n\n**Error:** Cannot connect to the AI model server. The model may still be loading — please try again in a moment."
+    except requests.Timeout:
+        yield "\n\n**Error:** The model took too long to respond. Please try a shorter question."
+    except Exception as e:
+        yield f"\n\n**Error:** {e}"
+
+
+def trim_conversation(messages, max_exchanges=MAX_CONVERSATION_EXCHANGES):
+    """Keep only the last N user-assistant exchange pairs.
+
+    This prevents the context from growing unbounded while maintaining
+    coherent conversation flow. Each exchange = 1 user + 1 assistant msg.
+    """
+    if len(messages) <= max_exchanges * 2:
+        return messages
+    return messages[-(max_exchanges * 2):]
+
 
 # ------------------------------------------------------------------
 # Helper functions
@@ -156,11 +253,15 @@ def read_file_content(filepath):
 
 
 def get_all_transcript_content():
-    """Concatenate content from every file (bundled + uploaded, cap at ~120 000 chars)."""
+    """Concatenate content from every file (bundled + uploaded).
+
+    Cap at ~32000 chars to fit within llama3.2:3b's 4096-token context
+    window when combined with system prompt and conversation history.
+    """
     files = get_all_files()
     parts = []
     total = 0
-    limit = 120_000
+    limit = 32_000
     for f in files:
         text = read_file_content(f["path"])
         if text and total < limit:
@@ -240,27 +341,7 @@ if "admin_auth" not in st.session_state:
     st.session_state.admin_auth = False
 if "page" not in st.session_state:
     st.session_state.page = "learn"
-if "user_api_key" not in st.session_state:
-    st.session_state.user_api_key = ""
 
-# Anthropic client
-MODEL = "claude-sonnet-4-5-20250929"
-
-
-def _get_anthropic_client():
-    """Create Anthropic client from secrets, env var, or user-provided key."""
-    api_key = _get_secret("ANTHROPIC_API_KEY")
-    if not api_key and st.session_state.get("user_api_key"):
-        api_key = st.session_state.user_api_key
-    if api_key:
-        try:
-            return anthropic.Anthropic(api_key=api_key)
-        except Exception:
-            return None
-    return None
-
-
-client = _get_anthropic_client()
 
 # ------------------------------------------------------------------
 # Sidebar
@@ -277,39 +358,30 @@ with st.sidebar:
 
     st.divider()
 
-    # -- API Key input (fallback when not configured via secrets/env) --
-    preconfigured_key = _get_secret("ANTHROPIC_API_KEY")
-    if not preconfigured_key:
-        st.markdown('<p class="sidebar-section">API Configuration</p>', unsafe_allow_html=True)
-        entered_key = st.text_input(
-            "Anthropic API Key",
-            type="password",
-            value=st.session_state.get("user_api_key", ""),
-            placeholder="sk-ant-...",
-            key="sidebar_api_key_input",
-            help="Enter your Anthropic API key. It is stored only in your session and never saved to disk.",
+    # -- Model status --
+    st.markdown('<p class="sidebar-section">AI Model</p>', unsafe_allow_html=True)
+    status, detail = check_ollama_status()
+    if status == "ready":
+        st.markdown(
+            f'<span class="model-badge model-ready">Ready: {detail}</span>',
+            unsafe_allow_html=True,
         )
-        if entered_key != st.session_state.get("user_api_key", ""):
-            st.session_state.user_api_key = entered_key
-            st.rerun()
+    elif status == "no_model":
+        st.markdown(
+            '<span class="model-badge model-loading">Model loading...</span>',
+            unsafe_allow_html=True,
+        )
+        st.caption(detail)
+    else:
+        st.markdown(
+            '<span class="model-badge model-error">Offline</span>',
+            unsafe_allow_html=True,
+        )
+        st.caption(detail)
 
-        if client:
-            st.markdown(
-                '<p style="color: #4ecdc4; font-size: 0.85rem;">&#9679; API key configured</p>',
-                unsafe_allow_html=True,
-            )
-        elif st.session_state.get("user_api_key"):
-            st.markdown(
-                '<p style="color: #ff6b6b; font-size: 0.85rem;">&#9679; Invalid API key</p>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                '<p style="color: #7a7a9a; font-size: 0.85rem;">&#9675; No API key provided</p>',
-                unsafe_allow_html=True,
-            )
+    st.caption(f"Backend: Ollama · {OLLAMA_MODEL}")
 
-        st.divider()
+    st.divider()
 
     # -- Files list --
     st.markdown('<p class="sidebar-section">Files used as context</p>', unsafe_allow_html=True)
@@ -389,10 +461,14 @@ if st.session_state.page == "admin":
         uploaded = [f for f in files if f["source"] == "uploaded"]
         total_kb = sum(f["size"] for f in files) / 1024
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("📌 Bundled", len(bundled))
         c2.metric("📄 Session Uploads", len(uploaded))
         c3.metric("💾 Total Size", f"{total_kb:.1f} KB")
+        # Model status in admin
+        status, detail = check_ollama_status()
+        status_label = {"ready": "Ready", "no_model": "Loading...", "offline": "Offline"}.get(status, "Error")
+        c4.metric("🤖 Model", status_label)
 
         st.divider()
 
@@ -502,6 +578,19 @@ if st.session_state.page == "admin":
 - Can quiz students using transcript content only"""
             )
 
+        # --- Model info ---
+        with st.expander("🤖 Model & Backend Info"):
+            st.markdown(f"""
+- **Backend:** Ollama (self-hosted, free)
+- **Model:** `{OLLAMA_MODEL}`
+- **Server:** `{OLLAMA_HOST}`
+- **Context limit:** ~32,000 chars of transcript content
+- **Conversation memory:** Last {MAX_CONVERSATION_EXCHANGES} exchanges
+- **Cost:** $0/month
+""")
+            if st.button("🔄 Refresh Model Status"):
+                st.rerun()
+
         st.divider()
 
         # Logout
@@ -560,7 +649,7 @@ strictly from the class transcripts uploaded by your teacher.</p>
   <li>🔍 <strong>Explore specific parts</strong> — <em>"What does this line in Sloka 19 mean?"</em></li>
 </ul>
 <p style="color:#7a7a9a; font-size:0.88rem;">All teachings come strictly from the class transcripts.
-No external sources are used.</p>
+No external sources are used. Powered by open-source AI (Llama 3.2).</p>
 </div>""",
             unsafe_allow_html=True,
         )
@@ -590,29 +679,7 @@ No external sources are used.</p>
         with st.chat_message("assistant", avatar="🙏"):
             transcript_content = get_all_transcript_content()
 
-            if client and transcript_content:
-                system = build_system_prompt(transcript_content)
-                try:
-                    with st.spinner("🙏 Contemplating the teachings..."):
-                        resp = client.messages.create(
-                            model=MODEL,
-                            max_tokens=4096,
-                            system=system,
-                            messages=[
-                                {"role": m["role"], "content": m["content"]}
-                                for m in st.session_state.messages
-                            ],
-                        )
-                        answer = resp.content[0].text
-                        st.markdown(answer)
-                        st.session_state.messages.append(
-                            {"role": "assistant", "content": answer}
-                        )
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                    st.info("Make sure ANTHROPIC_API_KEY is set in Streamlit secrets or as an environment variable.")
-
-            elif not transcript_content:
+            if not transcript_content:
                 no_files_msg = (
                     "🙏 No class transcripts have been uploaded yet. "
                     "Please ask the admin to upload the Soundarya Lahiri class transcripts "
@@ -623,12 +690,44 @@ No external sources are used.</p>
                     {"role": "assistant", "content": no_files_msg}
                 )
             else:
-                key_msg = (
-                    "No API key is configured. Please either set ANTHROPIC_API_KEY "
-                    "in Streamlit secrets / environment variables, or enter your "
-                    "Anthropic API key in the sidebar."
-                )
-                st.warning(key_msg)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": key_msg}
-                )
+                # Check model availability
+                model_status, model_detail = check_ollama_status()
+
+                if model_status != "ready":
+                    if model_status == "no_model":
+                        wait_msg = (
+                            "🔄 The AI model is still loading. This happens once after startup "
+                            "and may take a few minutes. Please try again shortly."
+                        )
+                    else:
+                        wait_msg = (
+                            f"⚠️ The AI model server is currently unavailable ({model_detail}). "
+                            "Please try again in a moment."
+                        )
+                    st.warning(wait_msg)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": wait_msg}
+                    )
+                else:
+                    system = build_system_prompt(transcript_content)
+
+                    # Trim conversation to last N exchanges for context window
+                    trimmed = trim_conversation(st.session_state.messages)
+                    chat_messages = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in trimmed
+                    ]
+
+                    # Stream the response
+                    full_response = st.write_stream(
+                        stream_ollama_response(chat_messages, system)
+                    )
+
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": full_response}
+                    )
+
+                    # Trim stored history
+                    st.session_state.messages = trim_conversation(
+                        st.session_state.messages
+                    )

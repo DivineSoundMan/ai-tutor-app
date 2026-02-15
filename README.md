@@ -1,73 +1,104 @@
 # 📚 AI Tutor Assistant App
 
-An intelligent tutoring application powered by Claude AI that helps students learn from class transcripts through interactive features including concept analysis, quiz generation, and personalized explanations.
+An intelligent tutoring application powered by **Llama 3.2** (via Ollama) that helps students learn from class transcripts through interactive features including concept analysis, quiz generation, and personalized explanations.
+
+**$0/month** — fully self-hosted with open-source models.
 
 ## ✨ Features
 
 - **📝 Transcript Analysis**: Upload class transcripts and get structured analysis of key concepts, learning objectives, and definitions
 - **🎯 Interactive Quizzes**: Generate customized multiple-choice quizzes to test understanding of the material
-- **💡 Concept Explanations**: Ask questions about specific concepts and get detailed explanations with real-world examples
-- **🤖 Powered by Claude 3.5 Sonnet**: Leverages advanced AI for accurate, educational responses
+- **💡 Concept Explanations**: Ask questions about specific concepts and get detailed explanations
+- **🤖 Powered by Llama 3.2 (3B)**: Free, self-hosted open-source LLM via Ollama
+- **⚡ Streaming Responses**: Real-time token streaming for better UX
+- **💬 Conversation Memory**: Maintains context across the last 10 exchanges
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────┐
+│          Hugging Face Spaces            │
+│  ┌──────────┐    ┌───────────────────┐  │
+│  │ Streamlit│◄──►│  Ollama Server    │  │
+│  │   :8501  │    │  llama3.2:3b      │  │
+│  └──────────┘    └───────────────────┘  │
+│       │                                  │
+│  ┌──────────┐                           │
+│  │Transcripts│ (bundled + uploads)      │
+│  └──────────┘                           │
+└─────────────────────────────────────────┘
+```
+
+- **LLM Backend**: Ollama with llama3.2:3b (Meta's latest 3B model)
+- **Web UI**: Streamlit with custom dark theme
+- **Deployment**: Docker on Hugging Face Spaces (free tier)
+- **Cost**: $0/month
 
 ## 🚀 Getting Started
 
-### Deploy to Streamlit Community Cloud (Recommended)
+### Deploy to Hugging Face Spaces (Recommended — Free)
 
-The easiest way to run this app is on [Streamlit Community Cloud](https://share.streamlit.io/) (free):
-
-1. Push this repo to GitHub (e.g. `github.com/DivineSoundMan/ai-tutor-app`)
-2. Go to [share.streamlit.io](https://share.streamlit.io/) and click **New app**
-3. Select your repo, branch `main`, and main file `app.py`
-4. Click **Advanced settings** and add your secrets:
-   ```toml
-   ANTHROPIC_API_KEY = "sk-ant-..."
-   ADMIN_PASSWORD = "your-secure-password"
+1. Create a new Space at [huggingface.co/spaces](https://huggingface.co/spaces)
+2. Select **Docker** as the SDK
+3. Push this repo to the Space:
+   ```bash
+   git remote add hf https://huggingface.co/spaces/YOUR_USERNAME/ai-tutor-app
+   git push hf main
    ```
-5. Click **Deploy**
-
-Your app will be live at `https://<your-app>.streamlit.app`.
+4. Set secrets in Space Settings:
+   - `ADMIN_PASSWORD` — password for the admin panel
+5. The Space will build the Docker image (model is baked in, ~2GB)
 
 ### Adding Transcript Files
 
 Transcript files committed to the `transcripts/` folder in the repo are **permanently available** and persist across app restarts. To add files:
 
 1. Place `.txt`, `.docx`, or `.pdf` files in the `transcripts/` folder
-2. Commit and push to GitHub
-3. Streamlit Cloud will automatically redeploy with the new files
+2. Commit and push
+3. The app will automatically redeploy with the new files
 
 Files uploaded via the admin panel are **session-only** and are lost when the app restarts.
 
-### Run Locally (Alternative)
+### Run Locally with Docker
 
-1. Clone the repository:
 ```bash
-git clone https://github.com/DivineSoundMan/ai-tutor-app.git
-cd ai-tutor-app
+docker build -t ai-tutor .
+docker run -p 8501:8501 -e ADMIN_PASSWORD=your-password ai-tutor
 ```
 
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+Open `http://localhost:8501` in your browser.
 
-3. Set up your secrets (choose one):
+### Run Locally without Docker
 
-   **Option A** — Environment variables:
+1. Install [Ollama](https://ollama.com/):
    ```bash
-   export ANTHROPIC_API_KEY='your-api-key-here'
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+
+2. Pull the model:
+   ```bash
+   ollama pull llama3.2:3b
+   ```
+
+3. Start Ollama (runs in background):
+   ```bash
+   ollama serve &
+   ```
+
+4. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+5. Set secrets (optional):
+   ```bash
    export ADMIN_PASSWORD='your-password'
    ```
 
-   **Option B** — Streamlit secrets file (`.streamlit/secrets.toml`):
-   ```toml
-   ANTHROPIC_API_KEY = "your-api-key-here"
-   ADMIN_PASSWORD = "your-password"
+6. Run the app:
+   ```bash
+   streamlit run app.py
    ```
-
-4. Run the app:
-```bash
-streamlit run app.py
-```
 
 The app will open at `http://localhost:8501`
 
@@ -85,7 +116,7 @@ The app will open at `http://localhost:8501`
 - Each question includes the correct answer and detailed explanation
 
 ### 3. Ask About Concepts
-- Visit the "💡 Ask About Concepts" section  
+- Visit the "💡 Ask About Concepts" section
 - Type any concept you'd like to understand better
 - Optionally use context from your uploaded transcript
 - Get comprehensive explanations with:
@@ -99,7 +130,9 @@ The app will open at `http://localhost:8501`
 ### Built With
 
 - **Streamlit**: Web application framework
-- **Anthropic Claude**: AI language model for educational content
+- **Ollama**: Self-hosted LLM inference server
+- **Llama 3.2 (3B)**: Meta's open-source language model
+- **Docker**: Containerized deployment
 - **Python**: Core programming language
 
 ### Project Structure
@@ -108,13 +141,35 @@ The app will open at `http://localhost:8501`
 ai-tutor-app/
 ├── app.py              # Main application file
 ├── requirements.txt    # Python dependencies
-├── transcripts/        # Bundled transcript files (persist on Streamlit Cloud)
+├── Dockerfile          # Docker build for HF Spaces
+├── start.sh            # Startup script (Ollama + Streamlit)
+├── transcripts/        # Bundled transcript files (persistent)
 ├── data/uploads/       # Session uploads (ephemeral)
 ├── .streamlit/
 │   └── config.toml     # Streamlit theme & settings
 ├── .gitignore          # Git ignore rules
 └── README.md           # This file
 ```
+
+### Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
+| `OLLAMA_MODEL` | `llama3.2:3b` | Model to use |
+| `ADMIN_PASSWORD` | `admin` | Admin panel password |
+| `PORT` | `8501` | Streamlit server port |
+
+### Alternative Models
+
+You can swap models by setting `OLLAMA_MODEL`:
+
+| Model | Size | Best For |
+|-------|------|----------|
+| `llama3.2:3b` | 2.0 GB | General tutoring (default) |
+| `phi3:mini` | 2.3 GB | Education-focused, fast |
+| `mistral:7b` | 4.1 GB | Complex reasoning |
+| `gemma2:2b` | 1.6 GB | Lightweight, fastest |
 
 ## 🎓 Use Cases
 
@@ -136,8 +191,9 @@ This project is open source and available for educational purposes.
 
 ## 🙏 Acknowledgments
 
-- Built with [Anthropic's Claude API](https://www.anthropic.com/)
+- LLM powered by [Ollama](https://ollama.com/) + [Meta Llama 3.2](https://llama.meta.com/)
 - UI powered by [Streamlit](https://streamlit.io/)
+- Hosted on [Hugging Face Spaces](https://huggingface.co/spaces)
 
 ## 📧 Contact
 
